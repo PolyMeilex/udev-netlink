@@ -1,4 +1,9 @@
-use std::{collections::HashMap, ffi::CStr, io::IoSliceMut, os::fd::RawFd};
+use std::{
+    collections::HashMap,
+    ffi::{c_void, CStr},
+    io::IoSliceMut,
+    os::fd::RawFd,
+};
 
 use bytemuck::{Pod, Zeroable};
 use memchr::memchr;
@@ -6,10 +11,9 @@ use nix::{
     libc,
     sys::{
         socket::{
-            bind, recv, recvmsg, socket, AddressFamily, MsgFlags, NetlinkAddr, SockFlag,
-            SockProtocol, SockType,
+            self, socket, AddressFamily, MsgFlags, NetlinkAddr, SockFlag, SockProtocol, SockType,
         },
-        stat::makedev,
+        stat,
     },
 };
 
@@ -52,22 +56,24 @@ fn main() {
     )
     .unwrap();
 
-    let addr = NetlinkAddr::new(
-        nix::unistd::Pid::this().as_raw() as u32,
-        UdevMonitorNetlinkGroup::Udev as u32,
-    );
+    socket::setsockopt(fd, nix::sys::socket::sockopt::PassCred, &true).unwrap();
+    socket::bind(
+        fd,
+        &NetlinkAddr::new(0, UdevMonitorNetlinkGroup::Udev as u32),
+    )
+    .unwrap();
 
     new_filter(fd);
 
-    bind(fd, &addr).unwrap();
+    let _port_id = socket::getsockname::<NetlinkAddr>(fd).unwrap().pid();
 
     loop {
-        let res = recv(fd, &mut [], MsgFlags::MSG_PEEK | MsgFlags::MSG_TRUNC).unwrap();
+        let res = socket::recv(fd, &mut [], MsgFlags::MSG_PEEK | MsgFlags::MSG_TRUNC).unwrap();
 
         let mut buffer = vec![0u8; res];
         let mut iov = [IoSliceMut::new(&mut buffer)];
 
-        let _res = recvmsg::<()>(fd, &mut iov, None, MsgFlags::empty()).unwrap();
+        let _res = socket::recvmsg::<()>(fd, &mut iov, None, MsgFlags::empty()).unwrap();
 
         let tag = CStr::from_bytes_with_nul(&buffer[0..8]);
 
@@ -106,7 +112,7 @@ fn main() {
         let minor = map.get("MINOR").and_then(|v| v.parse().ok());
 
         if let Some((major, minor)) = major.zip(minor) {
-            let devnum = makedev(major, minor);
+            let devnum = stat::makedev(major, minor);
             dbg!(devnum);
         }
     }
@@ -119,7 +125,9 @@ fn parse_map(buffer: &[u8]) -> HashMap<String, String> {
     while i < buffer.len() {
         let props = &buffer[i..];
 
-        let Some(id) = memchr(0, &props) else { break; };
+        let Some(id) = memchr(0, props) else {
+            break;
+        };
 
         let prop = &props[..id + 1];
         i += prop.len();
@@ -225,6 +233,8 @@ fn new_filter(fd: RawFd) {
         )
     };
 
-    println!("{}", nix::errno::Errno::from_i32(nix::errno::errno()));
-    dbg!(res);
+    if res != 0 {
+        println!("{}", nix::errno::Errno::from_i32(nix::errno::errno()));
+        dbg!(res);
+    }
 }
